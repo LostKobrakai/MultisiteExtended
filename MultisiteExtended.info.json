@@ -1,0 +1,15 @@
+{
+    "title": "Multisite Extended",
+    "version": "0.0.1",
+    "summary": "",
+    "author": "Benjamin Milde",
+    "href": "",
+    "permission": [],
+    "autoload": true,
+    "singular": true,
+    "requires": [
+        "PHP>=5.4.0",
+        "ProcessWire>=2.5.15"
+    ],
+    "installs": []
+}

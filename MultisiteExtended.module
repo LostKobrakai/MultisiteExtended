@@ -1,0 +1,219 @@
+<?php
+/**
+ * Multisite Extended (0.0.1)
+ * 
+ * 
+ * @author Benjamin Milde
+ * 
+ * ProcessWire 2.x
+ * Copyright (C) 2011 by Ryan Cramer
+ * Licensed under GNU/GPL v2, see LICENSE.TXT
+ * 
+ * http://www.processwire.com
+ * http://www.ryancramer.com
+ * 
+ */
+
+class MultisiteExtended extends WireData implements Module {
+
+	const fieldName = "multisite_root";
+
+	protected $domainArray = [];
+	protected $it;
+	protected $hitDomain;
+	protected $hitPagePath;
+	protected $debugger = false;
+
+	protected function parseDomains() {
+		//Clear Cache by Setting
+		$clear = false;
+		if($this->clearCache){
+			$data = wire('modules')->getModuleConfigData($this->className());
+			$data["clearCache"] = 0;
+			wire('modules')->saveModuleConfigData($this->className(), $data);
+
+			$clear = true;
+		}
+
+		$domains = explode("\n", trim($this->getDomains($clear)));
+
+		$domains = array_filter($domains);
+
+		foreach ($domains as $key => $domain) {
+			list($domain, $path) = explode("=", $domain, 2);
+
+			unset($domains[$key]);
+			$domains[$path] = $domain;
+		}
+
+		$this->domainArray = $domains;
+
+		return $this->domainArray;
+	}
+
+	/**
+	 * Handle requests to "multisite" domains
+	 *
+	 * Keep in mind, that this runs before api variables are accessable by $this->…
+	 */
+	public function init() {
+
+		$this->parseDomains();
+		$this->parseGetRequest();
+
+		if(!count($this->domainArray)) return;
+
+		$this->logger("Domains: ".implode(", ", $this->domainArray));
+		$this->logger("IT: ".$this->it);
+
+		foreach($this->domainArray as $path => $domain) {
+			$httpHost = strtolower(wire('config')->httpHost);
+
+			if(strpos($httpHost, $domain) !== false) {
+
+				$this->hitDomain = $domain;
+				$this->hitPagePath = $path;
+				$_GET['it'] = $this->modifyGetRequest($path);
+				$this->logger("New IT: ".$_GET['it']);
+				$this->addHookAfter('Page::path', $this, 'modifyPath');
+
+				break;
+			}
+		}
+
+		$this->logger("Hit: ".$this->hitDomain);
+		$this->logger("Hit: ".$this->hitPagePath);
+	}
+
+	/**
+	 * Prevent access to a "multisite" domain's subpages via the base domain
+	 * if page is not editable.
+	 */
+	public function ready() {
+		if($this->hitDomain || 
+			 !$this->isRootPagePartOfDomains() ||
+			 !count($this->domainArray)) return;
+
+		$this->hitDomain = $this->page->rootParent->name;
+
+		// if subdomain is visible on url, we might wanna redirect
+		if($this->isPartOfMultisiteTree($this->hitDomain) && !$this->page->editable()) {
+			$this->session->redirect($this->createRedirectUrl($this->hitDomain));
+		}
+	}
+
+	public function modifyPath($event) {
+		$event->return = str_replace($this->hitPagePath, '', $event->return);
+	}
+
+	/**
+	 * Parse the request path in a predictable format
+	 */
+	protected function parseGetRequest() {
+		$this->it = (isset($_GET['it'])) ? ltrim($_GET['it'], '/') : '';
+	}
+
+	/**
+	 * Return the request path that processwire should use instead
+	 * of the shorter multisite one.
+	 */
+	protected function modifyGetRequest($path) {
+		return "/" . $path . $this->it;
+	}
+
+	/**
+	 * Check if the current root page is part of the multisite domains
+	 */
+	protected function isRootPagePartOfDomains() {
+		return in_array($this->page->rootParent->name, $this->domainArray);
+	}
+
+	/**
+	 * Check if the current page is part of a multisite root domain
+	 */
+	protected function isPartOfMultisiteTree($domain) {
+		return strpos($this->it, $domain) === 0;
+	}
+
+	/**
+	 * Create the redirect url to a multisite domain
+	 */
+	protected function createRedirectUrl($domain) {
+		$protocol = $this->config->https ? "https://" : "http://";
+		$url = $protocol . $domain;
+		$url .= str_replace("/$domain/", '/', $this->page->url);
+	}
+
+	/**
+	 * Log info if debugger is enabled
+	 */
+	protected function logger($msg) {
+		if(!$this->debugger) return;
+
+		if(strpos($this->it, "admin") === 0) return;
+
+		$this->log->save("modules", "MultisiteExtended | ".$msg);
+	}
+
+	/**
+	 * Retrieve the list of domains from all pages
+	 */
+	protected function getDomains($skipCache=false) {
+
+		if($skipCache){
+			$domains = wire('cache')->get("multisite_domains", 0);
+		}else{
+			$domains = wire('cache')->get("multisite_domains");
+		}
+
+		if(!$domains) {
+			$domainRoots = wire('pages')->find(self::fieldName."!=''");
+		  $domainRoots->count() ? $domains = $domainRoots->implode("\n", function($root){
+
+		  	$domain = $root->get(self::fieldName);
+				$domain = trim($domain);
+				$domain = strtolower($domain);
+
+				$path = $root->path;
+				$path = ltrim($path, "/");
+		  	return $domain."=".$path;
+		  }) : '';
+		  wire('cache')->save('multisite_domains', $domains, WireCache::expireDaily);
+		}
+
+		return $domains;
+	}
+
+	/**
+	 * Create domainField
+	 */
+	public function ___install() {
+		$f = new Field();
+		$f->type = $this->modules->get("FieldtypeText");
+		$f->name = self::fieldName;
+		$f->label = $this->_("Multisite Root");
+		$f->description = $this->_('Make the child tree available through this domain.');
+		$f->notes = $this->_("Omit subdomains as long as the page should also be visible without the subdomain");
+		$f->placeholder = $this->_("domain.com");
+		$f->noRelative = 0;
+		$f->pattern = "([a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.)?[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}";
+		$f->save(); // save the field
+	}
+
+	/**
+	 * Remove domainField
+	 */
+	public function ___uninstall() {
+		$field = $this->fields->get(self::fieldName);
+
+		if($field->id){
+			foreach($field->getFieldgroups() as $fieldgroup){
+				$fieldgroup->remove($field);
+				$fieldgroup->save();
+			}
+
+			$this->fields->delete($field);
+		}
+	}
+
+}
