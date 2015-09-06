@@ -3,7 +3,7 @@
 class MultisiteExtendedConfig extends ModuleConfig {
 	public function getDefaults() {
 		return array(
-			"tryWWW" => 0,
+			"subdomainOptions" => array("www"),
 			"clearCache" => 0
 		);
 	}
@@ -11,10 +11,13 @@ class MultisiteExtendedConfig extends ModuleConfig {
 	public function getInputfields() {
 		$inputfields = parent::getInputfields();
 
-		$c = $this->modules->get('InputfieldCheckbox'); 
-		$c->attr('name', 'tryWWW'); 
-		$c->label = $this->_("Try www.*");
-		$c->description = $this->_("Should the module check www.* for subdomainless domains as well?");
+		$c = $this->modules->get('InputfieldCheckboxes'); 
+		$c->attr('name', 'subdomainOptions'); 
+		$c->label = $this->_("Subdomains");
+		$c->description = $this->_("Should the module check certain subdomains for subdomainless domains as well? E.g. for domain.com:");
+		$c->addOption("www", "www.domain.com");
+		$c->addOption("api", "api.domain.com");
+		// $c->addOption("*", "*.domain.com");
 		$inputfields->add($c); 
 
 		$c = $this->modules->get('InputfieldCheckbox'); 

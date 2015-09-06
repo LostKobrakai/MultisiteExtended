@@ -16,69 +16,62 @@
 
 class MultisiteExtended extends WireData implements Module {
 
+	/**
+	 * Name of the field the module does create to allow for the setup of multisite
+	 * roots in any page of the tree.
+	 *
+	 */
 	const fieldName = "multisite_root";
+	const cacheName = "multisite_domains";
 
+	/**
+	 * @var array  $domainArray List of domains keyed by their pagetree path
+	 * @var string $it          Sanitized request path
+	 * @var string $hitDomain   Domain, that does match the current requested page
+	 * @var string $hitPagePath Path of the page, that holds the hit domain
+	 * @var bool   $debugger    Determined if debug messages should be logged
+	 *
+	 */
 	protected $domainArray = [];
 	protected $it;
 	protected $hitDomain;
 	protected $hitPagePath;
 	protected $debugger = false;
 
-	protected function parseDomains() {
-		//Clear Cache by Setting
-		$clear = false;
-		if($this->clearCache){
-			$data = wire('modules')->getModuleConfigData($this->className());
-			$data["clearCache"] = 0;
-			wire('modules')->saveModuleConfigData($this->className(), $data);
-
-			$clear = true;
-		}
-
-		$domains = explode("\n", trim($this->getDomains($clear)));
-
-		$domains = array_filter($domains);
-
-		foreach ($domains as $key => $domain) {
-			list($domain, $path) = explode("=", $domain, 2);
-
-			unset($domains[$key]);
-			$domains[$path] = $domain;
-		}
-
-		$this->domainArray = $domains;
-
-		return $this->domainArray;
+	/**
+	 * Constuctor
+	 */
+	public function __construct() {
+		include_once("SimpleCache.php");
 	}
 
 	/**
 	 * Handle requests to "multisite" domains
 	 *
-	 * Keep in mind, that this runs before api variables are accessable by $this->…
+	 * Keep in mind, that this runs before processwire's api variables are available.
 	 */
 	public function init() {
 
 		$this->parseDomains();
 		$this->parseGetRequest();
+		$httpHost = strtolower(wire('config')->httpHost);
 
 		if(!count($this->domainArray)) return;
 
 		$this->logger("Domains: ".implode(", ", $this->domainArray));
 		$this->logger("IT: ".$this->it);
 
-		foreach($this->domainArray as $path => $domain) {
-			$httpHost = strtolower(wire('config')->httpHost);
+		/**
+		 * array_search seems to be slightly faster than foreach through the domains
+		 * @see https://gist.github.com/Ocramius/1290076
+		 */
+		if($path = $this->searchDomains($httpHost)) {
 
-			if(strpos($httpHost, $domain) !== false) {
-
-				$this->hitDomain = $domain;
-				$this->hitPagePath = $path;
-				$_GET['it'] = $this->modifyGetRequest($path);
-				$this->logger("New IT: ".$_GET['it']);
-				$this->addHookAfter('Page::path', $this, 'modifyPath');
-
-				break;
-			}
+			$this->hitDomain = $this->domainArray[$path];
+			$this->hitPagePath = $path;
+			$_GET['it'] = $this->modifyGetRequest($path);
+			$this->logger("New IT: ".$_GET['it']);
+			$this->addHookAfter('Page::path', $this, 'modifyPath');
 		}
 
 		$this->logger("Hit: ".$this->hitDomain);
@@ -86,66 +79,137 @@ class MultisiteExtended extends WireData implements Module {
 	}
 
 	/**
-	 * Prevent access to a "multisite" domain's subpages via the base domain
-	 * if page is not editable.
+	 * Redirect to the multisite domain if one is available and the current page
+	 * is not editable.
+	 *
 	 */
 	public function ready() {
 		if($this->hitDomain || 
-			 !$this->isRootPagePartOfDomains() ||
+			 !($domain = $this->isPagePartOfMultisiteTree()) ||
 			 !count($this->domainArray)) return;
 
-		$this->hitDomain = $this->page->rootParent->name;
+		$this->hitDomain = $domain;
+		$this->hitPagePath = $this->searchDomains($domain);
 
 		// if subdomain is visible on url, we might wanna redirect
-		if($this->isPartOfMultisiteTree($this->hitDomain) && !$this->page->editable()) {
-			$this->session->redirect($this->createRedirectUrl($this->hitDomain));
+		if(!$this->page->editable()) {
+			$url = $this->createRedirectUrl($this->hitDomain, $this->hitPagePath);
+			$this->session->redirect($url);
 		}
 	}
 
+	/**
+	 * The function, which runs on the Page::path hook
+	 *
+	 * Does remove the unneccessary part of the path that ProcessWire does provide.
+	 *
+	 * @param HookEvent $event 
+	 *
+	 */
 	public function modifyPath($event) {
 		$event->return = str_replace($this->hitPagePath, '', $event->return);
 	}
 
 	/**
 	 * Parse the request path in a predictable format
+	 *
 	 */
 	protected function parseGetRequest() {
 		$this->it = (isset($_GET['it'])) ? ltrim($_GET['it'], '/') : '';
 	}
 
 	/**
+	 * Search domainArray for domain
+	 *
+	 * @param string $domain Domain to search for
+	 */
+	protected function searchDomains($domain){
+		$path = array_search($domain, $this->domainArray);
+
+		if(substr_count($domain, ".") > 1){
+
+			if(!$path){
+				foreach ($this->subdomainOptions as $subdomain) {
+					if($subdomain === "*") continue;
+
+					$subdomain = $subdomain . ".";
+					if(strpos($domain, $subdomain) === 0){
+						$rootDomain = str_replace($subdomain, '', $domain);
+						$path = array_search($rootDomain, $this->domainArray);
+
+						break;
+					}
+				}
+			}
+
+			// wildcard
+			if(!$path){
+				if(in_array("*", $this->subdomainOptions)){
+					foreach ($this->domainArray as $tempPath => $tempDomain) {
+						if(strrpos($domain, $tempDomain) !== false){
+							$path = $tempPath;
+							break;
+						}
+					}
+				}
+			}
+		}
+
+		return $path;
+	}
+
+	/**
 	 * Return the request path that processwire should use instead
-	 * of the shorter multisite one.
+	 * of the requested multisite path.
+	 *
+	 * @param string $path Incoming request path
+	 * @return string Path that processwire should use
 	 */
 	protected function modifyGetRequest($path) {
 		return "/" . $path . $this->it;
 	}
 
 	/**
-	 * Check if the current root page is part of the multisite domains
+	 * Check if a given page is part of the multisite domains.
+	 * Defaults to using the current page.
+	 *
+	 * @param Page $page Page to check on
+	 * @return bool|string returns the domain if true
+	 *
 	 */
-	protected function isRootPagePartOfDomains() {
-		return in_array($this->page->rootParent->name, $this->domainArray);
-	}
+	protected function isPagePartOfMultisiteTree(Page $page = null) {
+		if(is_null($page)) $page = $this->page;
 
-	/**
-	 * Check if the current page is part of a multisite root domain
-	 */
-	protected function isPartOfMultisiteTree($domain) {
-		return strpos($this->it, $domain) === 0;
+		$root = $page->parent(self::fieldName."!=''");
+
+		if(!$root->id) return false;
+
+		if(in_array($root->get(self::fieldName), $this->domainArray)){
+			return $root->get(self::fieldName);
+		}else{
+			return false;
+		}
 	}
 
 	/**
 	 * Create the redirect url to a multisite domain
+	 *
+	 * @param string $domain The domain to redirect to
+	 * @param string $path The path to the domains root
+	 * @return string The full url to redirect to
+	 *
 	 */
-	protected function createRedirectUrl($domain) {
+	protected function createRedirectUrl($domain, $path) {
+		$path = trim($path, "/");
 		$protocol = $this->config->https ? "https://" : "http://";
 		$url = $protocol . $domain;
-		$url .= str_replace("/$domain/", '/', $this->page->url);
+		$url .= str_replace("/$path/", '/', $this->page->path);
+		return $url;
 	}
 
 	/**
-	 * Log info if debugger is enabled
+	 * Internal function to enable logging of debug messages
+	 *
 	 */
 	protected function logger($msg) {
 		if(!$this->debugger) return;
@@ -156,40 +220,141 @@ class MultisiteExtended extends WireData implements Module {
 	}
 
 	/**
-	 * Retrieve the list of domains from all pages
+	 * Retrieve all domains setup in pages
+	 *
+	 * Cache will expire every 24h or if clearCache is enables in the module's
+	 * settings.
+	 *
+	 * @param bool $skipCache Boolean value to determine skipping of the cache
+	 * @return string List of "domain=path" values separated by linebreaks
+	 *
 	 */
-	protected function getDomains($skipCache=false) {
+	protected function getDomains($skipCache = false) {
 
-		if($skipCache){
-			$domains = wire('cache')->get("multisite_domains", 0);
-		}else{
-			$domains = wire('cache')->get("multisite_domains");
+		if(!$skipCache && $this->clearCache){ // Clear cache via modules settings
+			$data = wire('modules')->getModuleConfigData($this->className());
+			$data["clearCache"] = 0;
+			wire('modules')->saveModuleConfigData($this->className(), $data);
+
+			$skipCache = true;
 		}
 
+		$cache = self::getCacheObj( $skipCache ? 0 : 24 * 3600);
+		$domains = $cache->get_cache(self::cacheName);
+
 		if(!$domains) {
+			$this->message("Regenerating Cache.");
+
 			$domainRoots = wire('pages')->find(self::fieldName."!=''");
-		  $domainRoots->count() ? $domains = $domainRoots->implode("\n", function($root){
 
-		  	$domain = $root->get(self::fieldName);
-				$domain = trim($domain);
-				$domain = strtolower($domain);
+			if($domainRoots->count()){
+		  	$domains = $domainRoots->implode("\n", function($root){
 
-				$path = $root->path;
-				$path = ltrim($path, "/");
-		  	return $domain."=".$path;
-		  }) : '';
-		  wire('cache')->save('multisite_domains', $domains, WireCache::expireDaily);
+					$domain = $root->get(self::fieldName);
+					$domain = trim($domain);
+					$domain = strtolower($domain);
+
+					$path = $root->path;
+					$path = ltrim($path, "/");
+
+			  	return $domain."=".$path;
+			  });
+		 	}else{
+		 		$domains = '';
+		 	}
+
+		 	// Cache list for 24h
+		  $cache->set_cache(self::cacheName, $domains);
 		}
 
 		return $domains;
 	}
 
 	/**
-	 * Create domainField
+	 * Wrapper function for instanciated use
+	 *
+	 * @return array Array of domains keyed by their paths
+	 *
+	 */
+	protected function parseDomains() {
+		$domains = self::parse($this->getDomains());
+		$this->domainArray = $domains;
+		return $this->domainArray;
+	}
+
+	/**
+	 * Parse the cached domainlist to an array
+	 *
+	 * @see self::getDomains for the domainlist generation
+	 * @return array Array of domains keyed by their paths
+	 *
+	 */
+	public static function parse($domains){
+		$domains = explode("\n", trim($domains));
+
+		// Remove potential empty lines
+		$domains = array_filter($domains);
+
+		foreach ($domains as $key => $domain) {
+			list($domain, $path) = explode("=", $domain, 2);
+
+			unset($domains[$key]);
+			$domains[$path] = $domain;
+		}
+
+		return $domains;
+	}
+
+	/**
+	 * Get the cache object
+	 *
+	 * @param int $expires Time in Seconds after which the cache expires, -1 to ignore it
+	 * @return SimpleCache Cache Object to work with
+	 *
+	 */
+	public static function getCacheObj($expires = 0) {
+		include_once("SimpleCache.php");
+
+		$cache = new SimpleCache();
+		$cache->cache_path = dirname(__FILE__) . "/cache/";
+		$cache->cache_time = (int) $expires;
+
+		return $cache;
+	}
+
+	/**
+	 * Extend the config.php whitelist with the cached domains
+	 *
+	 * Usage in config.php:
+	 * include_once("modules/MultisiteExtended/MultisiteExtended.module");
+	 * $config->httpHosts = MultisiteExtended::extendHostWhitelist(array(
+	 *   'example.com',
+	 *   'www.example.com'
+	 * ));
+	 * 
+	 * @param array $whitelist Default whitelist to extend
+	 * @return array Extended list of whitelisted domains
+	 *
+	 */
+	public static function extendHostWhitelist($whitelist){
+		$cache = self::getCacheObj(-1);
+		$domains = $cache->get_cache(self::cacheName);
+
+		if(!$domains) return $whitelist;
+
+		$domainArray = self::parse($domains);
+		$concat = array_merge($whitelist, array_values($domainArray));
+		return array_unique($concat);
+	}
+
+	/**
+	 * Module installation
+	 * Create the multisite root setup field
+	 * 
 	 */
 	public function ___install() {
 		$f = new Field();
-		$f->type = $this->modules->get("FieldtypeText");
+		$f->type = $this->modules->get("FieldtypeTextUnique");
 		$f->name = self::fieldName;
 		$f->label = $this->_("Multisite Root");
 		$f->description = $this->_('Make the child tree available through this domain.');
@@ -201,7 +366,10 @@ class MultisiteExtended extends WireData implements Module {
 	}
 
 	/**
-	 * Remove domainField
+	 * Module uninstallation
+	 * Removes the multisite root setup field if it's existing.
+	 * Removes the cachefile if exisiting.
+	 * 
 	 */
 	public function ___uninstall() {
 		$field = $this->fields->get(self::fieldName);
@@ -214,6 +382,9 @@ class MultisiteExtended extends WireData implements Module {
 
 			$this->fields->delete($field);
 		}
+
+		$cache = self::getCacheObj(0);
+		$domains = $cache->remove_cache(self::cacheName);
 	}
 
 }
