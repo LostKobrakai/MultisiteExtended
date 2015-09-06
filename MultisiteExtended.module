@@ -76,6 +76,10 @@ class MultisiteExtended extends WireData implements Module {
 
 		$this->logger("Hit: ".$this->hitDomain);
 		$this->logger("Hit: ".$this->hitPagePath);
+
+		$this->addHook("Pages::trashed", "clearCacheForTrashActions");
+		$this->addHook("Pages::restored", "clearCacheForTrashActions");
+		$this->addHook("Pages::deleted", "clearCacheForTrashActions");
 	}
 
 	/**
@@ -268,6 +272,19 @@ class MultisiteExtended extends WireData implements Module {
 		}
 
 		return $domains;
+	}
+
+	/**
+	 * Clear cache when page with domain is trashed/restored/deleted
+	 */
+	public function clearCacheForTrashActions($event) {
+		$page = $event->arguments(0);
+
+		if($page->fields->get(self::fieldName)){
+			$data = wire('modules')->getModuleConfigData($this->className());
+			$data["clearCache"] = 1;
+			wire('modules')->saveModuleConfigData($this->className(), $data);
+		}
 	}
 
 	/**
