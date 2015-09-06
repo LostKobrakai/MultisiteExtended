@@ -25,7 +25,7 @@ class MultisiteExtended extends WireData implements Module {
 	const cacheName = "multisite_domains";
 
 	/**
-	 * @var array  $domainArray List of domains keyed by their pagetree path
+	 * @var array  $domainArray List of paths keyed by their domain
 	 * @var string $it          Sanitized request path
 	 * @var string $hitDomain   Domain, that does match the current requested page
 	 * @var string $hitPagePath Path of the page, that holds the hit domain
@@ -67,7 +67,7 @@ class MultisiteExtended extends WireData implements Module {
 		 */
 		if($path = $this->searchDomains($httpHost)) {
 
-			$this->hitDomain = $this->domainArray[$path];
+			$this->hitDomain = $httpHost;
 			$this->hitPagePath = $path;
 			$_GET['it'] = $this->modifyGetRequest($path);
 			$this->logger("New IT: ".$_GET['it']);
@@ -128,38 +128,29 @@ class MultisiteExtended extends WireData implements Module {
 	 * @param string $domain Domain to search for
 	 */
 	protected function searchDomains($domain){
-		$path = array_search($domain, $this->domainArray);
+		return empty($this->domainArray[$domain]) ? false : $this->domainArray[$domain];
+	}
 
-		if(substr_count($domain, ".") > 1){
+	/**
+	 * Create Domain alternatives based on the module's settings
+	 *
+	 * @todo make the "no-subdomain" selection more bulletprove (.co.uk)
+	 * @param string $domain Domain to get alternatives from
+	 * @return array Array of alternativ domains
+	 *
+	 */
+	protected function createDomainAlternatives($domain) {
+		$alternatives = array();
 
-			if(!$path){
-				foreach ($this->subdomainOptions as $subdomain) {
-					if($subdomain === "*") continue;
+		if(substr_count($domain, ".") == 1 && count($this->subdomainOptions)){
+			foreach ($this->subdomainOptions as $subdomain) {
+				if($subdomain === "*") continue;
 
-					$subdomain = $subdomain . ".";
-					if(strpos($domain, $subdomain) === 0){
-						$rootDomain = str_replace($subdomain, '', $domain);
-						$path = array_search($rootDomain, $this->domainArray);
-
-						break;
-					}
-				}
-			}
-
-			// wildcard
-			if(!$path){
-				if(in_array("*", $this->subdomainOptions)){
-					foreach ($this->domainArray as $tempPath => $tempDomain) {
-						if(strrpos($domain, $tempDomain) !== false){
-							$path = $tempPath;
-							break;
-						}
-					}
-				}
+				$alternatives[] = $subdomain . "." . $domain;
 			}
 		}
 
-		return $path;
+		return $alternatives;
 	}
 
 	/**
@@ -217,7 +208,6 @@ class MultisiteExtended extends WireData implements Module {
 	 */
 	protected function logger($msg) {
 		if(!$this->debugger) return;
-
 		if(strpos($this->it, "admin") === 0) return;
 
 		$this->log->save("modules", "MultisiteExtended | ".$msg);
@@ -252,7 +242,8 @@ class MultisiteExtended extends WireData implements Module {
 			$domainRoots = wire('pages')->find(self::fieldName."!=''");
 
 			if($domainRoots->count()){
-		  	$domains = $domainRoots->implode("\n", function($root){
+				$domains = array();
+				foreach ($domainRoots as $root) {
 
 					$domain = $root->get(self::fieldName);
 					$domain = trim($domain);
@@ -261,8 +252,16 @@ class MultisiteExtended extends WireData implements Module {
 					$path = $root->path;
 					$path = ltrim($path, "/");
 
-			  	return $domain."=".$path;
-			  });
+			  	$domains[] = $domain."=".$path;
+
+			  	$alternatives = $this->createDomainAlternatives($domain);
+
+			  	foreach ($alternatives as $alt) {
+			  		$domains[] = $alt."=".$path;
+			  	}
+				}
+
+			  $domains = implode("\n", $domains);
 		 	}else{
 		 		$domains = '';
 		 	}
@@ -303,7 +302,7 @@ class MultisiteExtended extends WireData implements Module {
 	 * Parse the cached domainlist to an array
 	 *
 	 * @see self::getDomains for the domainlist generation
-	 * @return array Array of domains keyed by their paths
+	 * @return array Array of paths keyed by their domains
 	 *
 	 */
 	public static function parse($domains){
@@ -316,7 +315,7 @@ class MultisiteExtended extends WireData implements Module {
 			list($domain, $path) = explode("=", $domain, 2);
 
 			unset($domains[$key]);
-			$domains[$path] = $domain;
+			$domains[$domain] = $path;
 		}
 
 		return $domains;
@@ -360,7 +359,7 @@ class MultisiteExtended extends WireData implements Module {
 		if(!$domains) return $whitelist;
 
 		$domainArray = self::parse($domains);
-		$concat = array_merge($whitelist, array_values($domainArray));
+		$concat = array_merge($whitelist, array_keys($domainArray));
 		return array_unique($concat);
 	}
 
